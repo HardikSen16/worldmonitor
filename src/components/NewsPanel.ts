@@ -4,6 +4,7 @@ import type { NewsItem, ClusteredEvent, DeviationLevel, RelatedAsset, RelatedAss
 import { THREAT_PRIORITY } from '@/services/threat-classifier';
 import { formatTime, getCSSColor } from '@/utils';
 import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
+import { clusterNews } from '@/services/clustering';
 import { analysisWorker, enrichWithVelocityML, getClusterAssetContext, MAX_DISTANCE_KM, activityTracker, generateSummary } from '@/services';
 import { getSourcePropagandaRisk, getSourceTier, getSourceType } from '@/config/feeds';
 import { SITE_VARIANT } from '@/config';
@@ -258,14 +259,25 @@ export class NewsPanel extends Panel {
     const requestId = ++this.renderRequestId;
 
     try {
-      const clusters = await analysisWorker.clusterNews(items);
+      let clusters = await analysisWorker.clusterNews(items);
+      if (clusters.length === 0 && items.length > 0) {
+        clusters = clusterNews(items);
+      }
       if (requestId !== this.renderRequestId) return;
       const enriched = await enrichWithVelocityML(clusters);
       this.renderClusters(enriched);
     } catch (error) {
-      if (requestId !== this.renderRequestId) return;
-      console.error('[NewsPanel] Failed to cluster news:', error);
-      this.showError(t('common.failedClusterNews'));
+      console.error('[NewsPanel] Worker clustering failed, falling back to main thread:', error);
+      try {
+        const fallbackClusters = clusterNews(items);
+        if (requestId !== this.renderRequestId) return;
+        const enriched = await enrichWithVelocityML(fallbackClusters);
+        this.renderClusters(enriched);
+      } catch (fallbackError) {
+        if (requestId !== this.renderRequestId) return;
+        console.error('[NewsPanel] Fallback clustering failed:', fallbackError);
+        this.showError(t('common.failedClusterNews'));
+      }
     }
   }
 

@@ -9,12 +9,26 @@ const ALLOWED_ORIGIN_PATTERNS = [
   /^asset:\/\/localhost$/,
 ];
 
+function getHeader(req, name) {
+  if (!req || !req.headers) return '';
+
+  // Edge/Fetch Request headers API
+  if (typeof req.headers.get === 'function') {
+    return req.headers.get(name) || '';
+  }
+
+  // Node.js/Vercel headers object API
+  const value = req.headers[name] ?? req.headers[name.toLowerCase()] ?? req.headers[name.toUpperCase()];
+  if (Array.isArray(value)) return value[0] || '';
+  return typeof value === 'string' ? value : '';
+}
+
 function isAllowedOrigin(origin) {
   return Boolean(origin) && ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin));
 }
 
 export function getCorsHeaders(req, methods = 'GET, OPTIONS') {
-  const origin = req.headers.get('origin') || '';
+  const origin = getHeader(req, 'origin');
   const allowOrigin = isAllowedOrigin(origin) ? origin : 'https://worldmonitor.app';
   return {
     'Access-Control-Allow-Origin': allowOrigin,
@@ -26,7 +40,7 @@ export function getCorsHeaders(req, methods = 'GET, OPTIONS') {
 }
 
 export function isDisallowedOrigin(req) {
-  const origin = req.headers.get('origin');
+  const origin = getHeader(req, 'origin');
   if (!origin) return false;
   return !isAllowedOrigin(origin);
 }

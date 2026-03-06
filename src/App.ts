@@ -178,6 +178,11 @@ export class App {
   private pendingDeepLinkCountry: string | null = null;
   private briefRequestToken = 0;
   private readonly isDesktopApp = isDesktopRuntime();
+  private readonly isLocalDevHost = typeof window !== 'undefined' && (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1' ||
+    window.location.hostname.endsWith('.localhost')
+  );
 
   constructor(containerId: string) {
     const el = document.getElementById(containerId);
@@ -1664,6 +1669,7 @@ export class App {
 
   private renderLayout(): void {
     const currentLang = getCurrentLanguage();
+    const useLocalVariantSwitch = this.isDesktopApp || this.isLocalDevHost;
     const langOptions = LANGUAGES.map(l =>
       `<option value="${l.code}" ${l.code === currentLang ? 'selected' : ''}>${l.flag} ${l.code.toUpperCase()}</option>`
     ).join('');
@@ -1672,28 +1678,28 @@ export class App {
       <div class="header">
         <div class="header-left">
           <div class="variant-switcher">
-            <a href="${this.isDesktopApp ? '#' : (SITE_VARIANT === 'full' ? '#' : 'https://worldmonitor.app')}"
+            <a href="${useLocalVariantSwitch ? '#' : (SITE_VARIANT === 'full' ? '#' : 'https://worldmonitor.app')}"
                class="variant-option ${SITE_VARIANT === 'full' ? 'active' : ''}"
                data-variant="full"
-               ${!this.isDesktopApp && SITE_VARIANT !== 'full' ? 'target="_blank" rel="noopener"' : ''}
+               ${!useLocalVariantSwitch && SITE_VARIANT !== 'full' ? 'target="_blank" rel="noopener"' : ''}
                title="${t('header.world')}${SITE_VARIANT === 'full' ? ` ${t('common.currentVariant')}` : ''}">
               <span class="variant-icon">🌍</span>
               <span class="variant-label">${t('header.world')}</span>
             </a>
             <span class="variant-divider"></span>
-            <a href="${this.isDesktopApp ? '#' : (SITE_VARIANT === 'tech' ? '#' : 'https://tech.worldmonitor.app')}"
+            <a href="${useLocalVariantSwitch ? '#' : (SITE_VARIANT === 'tech' ? '#' : 'https://tech.worldmonitor.app')}"
                class="variant-option ${SITE_VARIANT === 'tech' ? 'active' : ''}"
                data-variant="tech"
-               ${!this.isDesktopApp && SITE_VARIANT !== 'tech' ? 'target="_blank" rel="noopener"' : ''}
+               ${!useLocalVariantSwitch && SITE_VARIANT !== 'tech' ? 'target="_blank" rel="noopener"' : ''}
                title="${t('header.tech')}${SITE_VARIANT === 'tech' ? ` ${t('common.currentVariant')}` : ''}">
               <span class="variant-icon">💻</span>
               <span class="variant-label">${t('header.tech')}</span>
             </a>
             <span class="variant-divider"></span>
-            <a href="${this.isDesktopApp ? '#' : (SITE_VARIANT === 'finance' ? '#' : 'https://finance.worldmonitor.app')}"
+            <a href="${useLocalVariantSwitch ? '#' : (SITE_VARIANT === 'finance' ? '#' : 'https://finance.worldmonitor.app')}"
                class="variant-option ${SITE_VARIANT === 'finance' ? 'active' : ''}"
                data-variant="finance"
-               ${!this.isDesktopApp && SITE_VARIANT !== 'finance' ? 'target="_blank" rel="noopener"' : ''}
+               ${!useLocalVariantSwitch && SITE_VARIANT !== 'finance' ? 'target="_blank" rel="noopener"' : ''}
                title="${t('header.finance')}${SITE_VARIANT === 'finance' ? ` ${t('common.currentVariant')}` : ''}">
               <span class="variant-icon">📈</span>
               <span class="variant-label">${t('header.finance')}</span>
@@ -1728,6 +1734,8 @@ export class App {
           <select id="langSelect" class="lang-select">
             ${langOptions}
           </select>
+          ${localStorage.getItem('worldmonitor-is-admin') === '1' ? '' : '<button class="profile-btn" id="editProfileBtn">👤 Edit Profile</button>'}
+          <button class="logout-btn" id="logoutBtn">⇦ Logout</button>
           <button class="search-btn" id="searchBtn"><kbd>⌘K</kbd> ${t('header.search')}</button>
           ${this.isDesktopApp ? '' : `<button class="copy-link-btn" id="copyLinkBtn">${t('header.copyLink')}</button>`}
           <button class="theme-toggle-btn" id="headerThemeToggle" title="${t('header.toggleTheme')}">
@@ -2406,6 +2414,14 @@ export class App {
   }
 
   private setupEventListeners(): void {
+    document.getElementById('editProfileBtn')?.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('worldmonitor:edit-profile-request'));
+    });
+
+    document.getElementById('logoutBtn')?.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('worldmonitor:logout-request'));
+    });
+
     // Search button
     document.getElementById('searchBtn')?.addEventListener('click', () => {
       this.updateSearchIndex();
@@ -2452,8 +2468,8 @@ export class App {
     // Sources modal
     this.setupSourcesModal();
 
-    // Variant switcher: switch variant locally on desktop (reload with new config)
-    if (this.isDesktopApp) {
+    // Variant switcher: switch variant locally on desktop and localhost dev sessions.
+    if (this.isDesktopApp || this.isLocalDevHost) {
       this.container.querySelectorAll<HTMLAnchorElement>('.variant-option').forEach(link => {
         link.addEventListener('click', (e) => {
           const variant = link.dataset.variant;
@@ -4067,9 +4083,11 @@ export class App {
       }
 
       if (data.length === 0) {
-        const reason = isFeatureAvailable('economicFred')
-          ? 'FRED data temporarily unavailable — will retry'
-          : 'FRED_API_KEY not configured — add in Settings';
+        const reason = this.isDesktopApp
+          ? (isFeatureAvailable('economicFred')
+            ? 'FRED data temporarily unavailable — will retry'
+            : 'FRED_API_KEY not configured — add in Settings')
+          : 'FRED data unavailable locally — verify FRED_API_KEY in .env.local and restart vercel dev';
         economicPanel?.setErrorState(true, reason);
         this.statusPanel?.updateApi('FRED', { status: 'error' });
         return;
@@ -4156,7 +4174,10 @@ export class App {
     try {
       const fireResult = await fetchAllFires(1);
       if (fireResult.skipped) {
-        this.panels['satellite-fires']?.showConfigError('NASA_FIRMS_API_KEY not configured — add in Settings');
+        const reason = this.isDesktopApp
+          ? 'NASA_FIRMS_API_KEY not configured — add in Settings'
+          : (fireResult.reason || 'NASA FIRMS data unavailable locally — verify NASA_FIRMS_API_KEY in .env.local and restart vercel dev');
+        this.panels['satellite-fires']?.showConfigError(reason);
         this.statusPanel?.updateApi('FIRMS', { status: 'error' });
         return;
       }

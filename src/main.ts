@@ -2,7 +2,15 @@ import './styles/main.css';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as Sentry from '@sentry/browser';
 import { inject } from '@vercel/analytics';
+import type { User } from 'firebase/auth';
 import { App } from './App';
+import { AuthGate } from '@/components/AuthGate';
+import { ProfileOnboarding } from '@/components/ProfileOnboarding';
+import { isFirebaseAuthConfigured, signOutCurrentUser } from '@/services/firebase-auth';
+import { isAdminEmail } from '@/services/admin-access';
+import { applyUserPersonalization } from '@/services/personalization';
+import { getStoredUserProfile, saveUserProfile } from '@/services/profile-store';
+import { isMobileDevice } from '@/utils';
 
 // Initialize Sentry error tracking (early as possible)
 Sentry.init({
@@ -48,14 +56,129 @@ requestAnimationFrame(() => {
   document.documentElement.classList.remove('no-transition');
 });
 
-const app = new App('app');
-app
-  .init()
-  .then(() => {
-    // Clear the one-shot guard after a successful boot so future stale-chunk incidents can recover.
-    clearChunkReloadGuard(chunkReloadStorageKey);
-  })
-  .catch(console.error);
+let dashboardApp: App | null = null;
+let currentUser: User | null = null;
+
+async function startDashboard(): Promise<void> {
+  if (dashboardApp) return;
+
+  dashboardApp = new App('app');
+  await dashboardApp.init();
+
+  // Clear the one-shot guard after a successful boot so future stale-chunk incidents can recover.
+  clearChunkReloadGuard(chunkReloadStorageKey);
+}
+
+function mountProfileOnboarding(
+  appRoot: HTMLElement,
+  user: User,
+  mode: 'create' | 'edit',
+  initialProfile: import('@/types/profile').UserProfileInput | null,
+): void {
+  const onboarding = new ProfileOnboarding(appRoot, {
+    userEmail: user.email ?? 'unknown user',
+    initialProfile,
+    mode,
+    onCancel: () => {
+      onboarding.destroy();
+      void startDashboard().catch(console.error);
+    },
+    onComplete: (profile) => {
+      void (async () => {
+        await saveUserProfile(user.uid, user.email ?? '', profile);
+        applyUserPersonalization(profile, isMobileDevice());
+        onboarding.destroy();
+        await restartDashboard();
+      })().catch(console.error);
+    },
+  });
+  onboarding.mount();
+}
+
+async function stopDashboard(): Promise<void> {
+  if (!dashboardApp) return;
+  dashboardApp.destroy();
+  dashboardApp = null;
+}
+
+async function restartDashboard(): Promise<void> {
+  await stopDashboard();
+  await startDashboard();
+}
+
+async function handleAuthenticatedUser(user: User, appRoot: HTMLElement): Promise<void> {
+  currentUser = user;
+  const isAdmin = isAdminEmail(user.email);
+  localStorage.setItem('worldmonitor-auth-user-email', user.email ?? '');
+  localStorage.setItem('worldmonitor-is-admin', isAdmin ? '1' : '0');
+
+  if (isAdmin) {
+    await startDashboard();
+    return;
+  }
+
+  const existingProfile = await getStoredUserProfile(user.uid);
+  if (existingProfile) {
+    applyUserPersonalization(existingProfile.profile, isMobileDevice());
+    await startDashboard();
+    return;
+  }
+
+  mountProfileOnboarding(appRoot, user, 'create', null);
+}
+
+function mountAuthGate(appRoot: HTMLElement): void {
+  appRoot.innerHTML = '';
+
+  const authGate = new AuthGate(appRoot, {
+    onAuthenticated: (user) => {
+      authGate.destroy();
+      void handleAuthenticatedUser(user, appRoot).catch(console.error);
+    },
+  });
+  authGate.mount();
+}
+
+function bootstrap(): void {
+  const appRoot = document.getElementById('app');
+  if (!appRoot) {
+    throw new Error('App root #app not found');
+  }
+
+  if (!isFirebaseAuthConfigured()) {
+    console.warn('[auth] Firebase config missing; skipping auth gate and loading dashboard directly.');
+    void startDashboard().catch(console.error);
+    return;
+  }
+
+  window.addEventListener('worldmonitor:edit-profile-request', () => {
+    void (async () => {
+      if (!currentUser || localStorage.getItem('worldmonitor-is-admin') === '1') return;
+      const existingProfile = await getStoredUserProfile(currentUser.uid);
+      await stopDashboard();
+      mountProfileOnboarding(appRoot, currentUser, 'edit', existingProfile?.profile ?? null);
+    })().catch(console.error);
+  });
+
+  window.addEventListener('worldmonitor:logout-request', () => {
+    void (async () => {
+      await stopDashboard();
+      currentUser = null;
+      localStorage.removeItem('worldmonitor-auth-user-email');
+      localStorage.removeItem('worldmonitor-is-admin');
+      try {
+        await signOutCurrentUser();
+      } catch (error) {
+        console.warn('[auth] sign out failed', error);
+      }
+      mountAuthGate(appRoot);
+    })().catch(console.error);
+  });
+
+  mountAuthGate(appRoot);
+}
+
+bootstrap();
 
 // Debug helpers for geo-convergence testing (remove in production)
 (window as unknown as Record<string, unknown>).geoDebug = {
